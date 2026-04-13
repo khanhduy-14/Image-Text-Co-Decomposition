@@ -1,0 +1,99 @@
+_base_: "experiment_configs.yml"
+
+model:
+  type: ImageTextCoDecomposition
+  clip_model: ViT-B/16
+  ie_freeze: 11
+  ie_ignore_last_attn: true
+  masker:
+    type: Masker
+    decoder:
+      type: GDecoder
+      double: false
+      n_layers: 2
+      kernel_size: 3
+      act: gelu
+      norm: ln
+    sim2mask:
+      init_w: 10.0
+      init_b: -2.5
+      gumbel_tau: 1.0
+      learnable: true
+
+  w_kg: 8.0
+  use_region_highlighting_prompt: true
+  w_tcl: 0.1
+  pos_area: 0.25
+  w_pos_area: 0.5
+  w_neg_area: 0.05
+  w_tv: 1.0
+  w_hcl: 0.5
+  w_tseg: 1.0
+  use_word_highlighting_prompt: true
+
+data:
+  batch_size: 12
+  pin_memory: false
+  num_workers: 4
+  seed: ${train.seed}
+  dataset:
+    meta:
+      sub_captions:
+        type: img_txt_pair
+        path: ???
+        prefix: "{00000..00019}.tar"
+        length: 190011
+    train:
+      - sub_captions
+
+  img_aug:
+    deit_aug: false
+    img_size: 224
+    img_scale: [0.9, 1.0]
+    interpolation: bilinear
+    color_jitter: 0.4
+    auto_augment: "rand-m9-mstd0.5-inc1"
+    re_prob: 0.25
+    re_mode: "pixel"
+    re_count: 1
+
+  text_aug: null
+  num_words: 2
+  word_type: noun
+
+train:
+  start_step: 0
+  total_steps: 15000
+  warmup_steps: 2000
+  ust_steps: 8000
+  base_lr: 5e-5
+  weight_decay: 0.05
+  min_lr: 1e-5
+  clip_grad: 5.0
+  fp16: true
+  fp16_comm: false
+  seed: 0
+
+  lr_scheduler:
+    name: cosine
+
+  optimizer:
+    name: adamw
+    eps: 1e-6
+    betas: [0.9, 0.999]
+
+evaluate:
+  eval_only: false
+  eval_freq: 3000
+
+checkpoint:
+  resume: ???
+  save_topk: 1
+  save_all: false
+
+output: ???
+tag: finetune
+print_freq: 20
+seed: 0
+method_name: code_finetune
+wandb: false
