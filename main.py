@@ -105,7 +105,12 @@ def train(cfg):
         if key == "cls":
             continue
 
-        loader = build_seg_dataloader(build_seg_dataset(cfg.evaluate.get(key)))
+        seg_cfg = cfg.evaluate.get(key, None)
+        if seg_cfg is None:
+            logger.warning(f"Skip {key}: no config found")
+            continue
+
+        loader = build_seg_dataloader(build_seg_dataset(seg_cfg))
         val_loaders[key] = loader
 
     logger = get_logger()
