@@ -101,7 +101,11 @@ def train(cfg):
 
     # build validation loaders
     val_loaders = {}
+    allowed_tasks = {"ade20k", "cityscapes"}
     for key in cfg.evaluate.task:
+        if key not in allowed_tasks:
+               continue
+
         if key == "cls":
             continue
 
