@@ -41,7 +41,7 @@ data:
       sub_captions:
         type: img_txt_pair
         path: ???
-        prefix: "{00000..00019}.tar"
+        prefix: "{00000..00019}"
         length: 190011
     train:
       - sub_captions
