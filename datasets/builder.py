@@ -5,10 +5,12 @@
 # Modified from TCL (https://github.com/kakaobrain/tcl)
 # Copyright (c) 2023 Kakao Brain. All Rights Reserved.
 # ------------------------------------------------------------------------------
+import os
 import os.path as osp
 import random
 import warnings
 from functools import partial
+import glob
 
 import numpy as np
 import torch.distributed as dist
@@ -22,6 +24,7 @@ from sclip.clip import tokenize
 
 from torch.utils.data._utils.collate import default_collate as torch_default_collate
 from .noun_parser import WordAugTokenizeWrapper
+from PIL import Image
 
 import torch
 from sclip.simple_tokenizer import SimpleTokenizer as _Tokenizer
@@ -142,6 +145,90 @@ def warn_and_continue(exn):
     return True
 
 
+def is_extracted_webdataset(path):
+    """Check if path is an extracted webdataset directory"""
+    if not osp.isdir(path):
+        return False
+
+    # Check for numbered subdirectories (00000, 00001, etc.)
+    subdirs = [d for d in os.listdir(path)
+               if osp.isdir(osp.join(path, d)) and d.isdigit()]
+
+    if not subdirs:
+        return False
+
+    # Check if first subdir has image and text files
+    first_dir = osp.join(path, subdirs[0])
+    files = os.listdir(first_dir)
+    has_image = any(f.endswith(('.jpg', '.png', '.jpeg')) for f in files)
+    has_text = any(f.endswith(('.txt', '.text')) for f in files)
+
+    return has_image and has_text
+
+
+class ExtractedWebDataset(torch.utils.data.IterableDataset):
+    """Dataset for extracted webdataset directories"""
+
+    def __init__(self, dir_path, img_transform, text_transform):
+        self.dir_path = dir_path
+        self.img_transform = img_transform
+        self.text_transform = text_transform
+
+        # Collect all sample directories
+        self.sample_dirs = sorted([
+            osp.join(dir_path, d)
+            for d in os.listdir(dir_path)
+            if osp.isdir(osp.join(dir_path, d)) and d.isdigit()
+        ])
+
+        self._length = len(self.sample_dirs)
+
+    def __len__(self):
+        return self._length
+
+    def __iter__(self):
+        while True:
+            for sample_dir in self.sample_dirs:
+                try:
+                    files = os.listdir(sample_dir)
+
+                    # Find image and text files
+                    image_file = None
+                    text_file = None
+
+                    for f in files:
+                        if f.endswith(('.jpg', '.png', '.jpeg')) and image_file is None:
+                            image_file = f
+                        elif f.endswith(('.txt', '.text')) and text_file is None:
+                            text_file = f
+
+                    if not image_file or not text_file:
+                        continue
+
+                    # Load image
+                    img_path = osp.join(sample_dir, image_file)
+                    image = Image.open(img_path).convert('RGB')
+
+                    # Load text
+                    text_path = osp.join(sample_dir, text_file)
+                    with open(text_path, 'r', encoding='utf-8') as f:
+                        caption = f.read().strip()
+
+                    # Apply transforms
+                    image = self.img_transform(image)
+                    nouns, caption, pseudo_text_mask = self.text_transform(caption)
+
+                    yield {
+                        'image': image,
+                        'text': (nouns, caption, pseudo_text_mask)
+                    }
+
+                except (NounNotEnoughError, Exception) as e:
+                    if not isinstance(e, NounNotEnoughError):
+                        warnings.warn(repr(e))
+                    continue
+
+
 def build_dataset(config):
     """
     Args:
@@ -153,7 +240,9 @@ def build_dataset(config):
     split = "train"
     dataset_type = None
     tar_file_list = []
+    extracted_dirs = []
     total_length = 0
+
     for ds in config.dataset[split]:
         ds_meta = config.dataset.meta[ds]
         if dataset_type is None:
@@ -164,29 +253,60 @@ def build_dataset(config):
         prefix = ds_meta.prefix
         path = ds_meta.path
         length = ds_meta.length
-        cur_tar_file_list = []
-        for tar_file in braceexpand(osp.join(path, prefix)):
-            if osp.exists(tar_file):
-                cur_tar_file_list.append(tar_file)
-        print(f"Found {len(cur_tar_file_list)} files for dataset {ds}")
-        tar_file_list.extend(cur_tar_file_list)
+
+        for expanded_path in braceexpand(osp.join(path, prefix)):
+            if not osp.exists(expanded_path):
+                continue
+
+            # Check if it's an extracted webdataset directory
+            if is_extracted_webdataset(expanded_path):
+                extracted_dirs.append(expanded_path)
+                print(f"Found extracted webdataset: {expanded_path}")
+            # Check if it's a tar file
+            elif expanded_path.endswith('.tar') and osp.isfile(expanded_path):
+                tar_file_list.append(expanded_path)
+            # Check for tar files in directory
+            elif osp.isdir(expanded_path):
+                found_tars = glob.glob(osp.join(expanded_path, '*.tar'))
+                if found_tars:
+                    tar_file_list.extend(found_tars)
+                    print(f"Found {len(found_tars)} tar files in {expanded_path}")
+
         total_length += length
 
-    print(f"Found {len(tar_file_list)} files in total for split {split}")
-    dataset = (
-        wds.WebDataset(tar_file_list, repeat=True, handler=warn_and_continue)
-        .shuffle(40000)  # datapoint-level shuffle
-        .decode("pil", handler=warn_and_continue)
-        .rename(
-            image="jpg;png;jpeg",
-            text="text;txt",
-            caption="text;txt",
-            keep=False,
-            handler=warn_and_continue,
+    print(f"Found {len(tar_file_list)} tar files, {len(extracted_dirs)} extracted directories")
+
+    # Build dataset based on what we found
+    if tar_file_list and not extracted_dirs:
+        # Use tar files
+        dataset = (
+            wds.WebDataset(tar_file_list, repeat=True, handler=warn_and_continue)
+            .shuffle(40000)
+            .decode("pil", handler=warn_and_continue)
+            .rename(
+                image="jpg;png;jpeg",
+                text="text;txt",
+                caption="text;txt",
+                keep=False,
+                handler=warn_and_continue,
+            )
+            .map_dict(image=img_transform, text=text_transform, handler=warn_and_continue)
+            .with_length(total_length)
         )
-        .map_dict(image=img_transform, text=text_transform, handler=warn_and_continue)
-        .with_length(total_length)
-    )
+    elif extracted_dirs and not tar_file_list:
+        # Use extracted directories (combine multiple if needed)
+        if len(extracted_dirs) == 1:
+            dataset = ExtractedWebDataset(extracted_dirs[0], img_transform, text_transform)
+        else:
+            # Combine multiple extracted directories
+            combined_dir = extracted_dirs[0]
+            dataset = ExtractedWebDataset(combined_dir, img_transform, text_transform)
+    else:
+        raise ValueError(f"No tar files or extracted directories found. tar_files={len(tar_file_list)}, extracted_dirs={len(extracted_dirs)}")
+
+    # Add length if dataset supports it
+    if hasattr(dataset, 'with_length'):
+        dataset = dataset.with_length(total_length)
 
     return dataset
 
