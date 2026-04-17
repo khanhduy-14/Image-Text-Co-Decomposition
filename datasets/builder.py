@@ -254,23 +254,46 @@ def build_dataset(config):
         path = ds_meta.path
         length = ds_meta.length
 
-        for expanded_path in braceexpand(osp.join(path, prefix)):
+        print(f"\n=== Dataset: {ds} ===")
+        print(f"Path: {path}")
+        print(f"Prefix: {prefix}")
+
+        expanded_paths = list(braceexpand(osp.join(path, prefix)))
+        print(f"Expanded paths: {expanded_paths}")
+
+        for expanded_path in expanded_paths:
+            print(f"\nChecking: {expanded_path}")
+            print(f"  Exists: {osp.exists(expanded_path)}")
+
             if not osp.exists(expanded_path):
+                print(f"  -> Path does not exist, skipping")
                 continue
+
+            print(f"  Is file: {osp.isfile(expanded_path)}")
+            print(f"  Is dir: {osp.isdir(expanded_path)}")
 
             # Check if it's an extracted webdataset directory
             if is_extracted_webdataset(expanded_path):
                 extracted_dirs.append(expanded_path)
-                print(f"Found extracted webdataset: {expanded_path}")
+                print(f"  -> Found extracted webdataset: {expanded_path}")
             # Check if it's a tar file
             elif expanded_path.endswith('.tar') and osp.isfile(expanded_path):
                 tar_file_list.append(expanded_path)
+                print(f"  -> Found tar file")
             # Check for tar files in directory
             elif osp.isdir(expanded_path):
                 found_tars = glob.glob(osp.join(expanded_path, '*.tar'))
                 if found_tars:
                     tar_file_list.extend(found_tars)
-                    print(f"Found {len(found_tars)} tar files in {expanded_path}")
+                    print(f"  -> Found {len(found_tars)} tar files in {expanded_path}")
+                else:
+                    print(f"  -> Is directory but no tar files found")
+                    # Debug: list contents
+                    try:
+                        contents = os.listdir(expanded_path)
+                        print(f"     Directory contents (first 10): {contents[:10]}")
+                    except Exception as e:
+                        print(f"     Could not list directory: {e}")
 
         total_length += length
 
