@@ -147,14 +147,22 @@ def warn_and_continue(exn):
 
 def is_extracted_webdataset(path):
     """Check if path is an extracted webdataset directory"""
+    print(f"    [is_extracted_webdataset] Checking: {path}")
+
     if not osp.isdir(path):
+        print(f"    [is_extracted_webdataset] Not a directory, skipping")
         return False
 
     # Check for numbered subdirectories (00000, 00001, etc.)
-    subdirs = [d for d in os.listdir(path)
+    all_items = os.listdir(path)
+    subdirs = [d for d in all_items
                if osp.isdir(osp.join(path, d)) and d.isdigit()]
 
+    print(f"    [is_extracted_webdataset] Total items: {len(all_items)}")
+    print(f"    [is_extracted_webdataset] Numeric subdirs found: {len(subdirs)}")
+
     if not subdirs:
+        print(f"    [is_extracted_webdataset] No numeric subdirectories found")
         return False
 
     # Check if first subdir has image and text files
@@ -163,7 +171,13 @@ def is_extracted_webdataset(path):
     has_image = any(f.endswith(('.jpg', '.png', '.jpeg')) for f in files)
     has_text = any(f.endswith(('.txt', '.text')) for f in files)
 
-    return has_image and has_text
+    print(f"    [is_extracted_webdataset] First subdir ({subdirs[0]}): {len(files)} files")
+    print(f"    [is_extracted_webdataset] Files: {files}")
+    print(f"    [is_extracted_webdataset] Has image: {has_image}, Has text: {has_text}")
+
+    result = has_image and has_text
+    print(f"    [is_extracted_webdataset] Result: {result}")
+    return result
 
 
 class ExtractedWebDataset(torch.utils.data.IterableDataset):
@@ -257,12 +271,31 @@ def build_dataset(config):
         print(f"\n=== Dataset: {ds} ===")
         print(f"Path: {path}")
         print(f"Prefix: {prefix}")
+        print(f"Dataset type: {ds_meta.type}")
+        print(f"Expected length: {length}")
+
+        # DEBUG: Check if path exists and list contents
+        print(f"\n[DEBUG] Checking raw path: {path}")
+        print(f"[DEBUG] Raw path exists: {osp.exists(path)}")
+        if osp.exists(path):
+            try:
+                contents = os.listdir(path)
+                print(f"[DEBUG] Path is directory: {osp.isdir(path)}")
+                print(f"[DEBUG] Number of items in path: {len(contents)}")
+                print(f"[DEBUG] First 15 items: {sorted(contents)[:15]}")
+                # Check if any are numeric directories (extracted webdataset)
+                numeric_dirs = [c for c in contents if osp.isdir(osp.join(path, c)) and c.isdigit()]
+                print(f"[DEBUG] Numeric directories found: {len(numeric_dirs)}")
+                if numeric_dirs:
+                    print(f"[DEBUG] Numeric dir examples: {sorted(numeric_dirs)[:5]}")
+            except Exception as e:
+                print(f"[DEBUG] Error listing path: {e}")
 
         expanded_paths = list(braceexpand(osp.join(path, prefix)))
-        print(f"Expanded paths: {expanded_paths}")
+        print(f"\nExpanded paths ({len(expanded_paths)} total): {expanded_paths}")
 
-        for expanded_path in expanded_paths:
-            print(f"\nChecking: {expanded_path}")
+        for i, expanded_path in enumerate(expanded_paths):
+            print(f"\n[{i+1}/{len(expanded_paths)}] Checking: {expanded_path}")
             print(f"  Exists: {osp.exists(expanded_path)}")
 
             if not osp.exists(expanded_path):
@@ -275,33 +308,54 @@ def build_dataset(config):
             # Check if it's an extracted webdataset directory
             if is_extracted_webdataset(expanded_path):
                 extracted_dirs.append(expanded_path)
-                print(f"  -> Found extracted webdataset: {expanded_path}")
+                print(f"  ✓ Found extracted webdataset: {expanded_path}")
+                # Count subdirectories
+                subdirs = [d for d in os.listdir(expanded_path) if osp.isdir(osp.join(expanded_path, d)) and d.isdigit()]
+                print(f"    - Subdirectories: {len(subdirs)}")
+                print(f"    - Examples: {sorted(subdirs)[:5]}")
             # Check if it's a tar file
             elif expanded_path.endswith('.tar') and osp.isfile(expanded_path):
                 tar_file_list.append(expanded_path)
-                print(f"  -> Found tar file")
+                print(f"  ✓ Found tar file")
             # Check for tar files in directory
             elif osp.isdir(expanded_path):
                 found_tars = glob.glob(osp.join(expanded_path, '*.tar'))
                 if found_tars:
                     tar_file_list.extend(found_tars)
-                    print(f"  -> Found {len(found_tars)} tar files in {expanded_path}")
+                    print(f"  ✓ Found {len(found_tars)} tar files in {expanded_path}")
                 else:
-                    print(f"  -> Is directory but no tar files found")
+                    print(f"  ! Is directory but no tar files found")
                     # Debug: list contents
                     try:
                         contents = os.listdir(expanded_path)
-                        print(f"     Directory contents (first 10): {contents[:10]}")
+                        print(f"    - Total items: {len(contents)}")
+                        print(f"    - First 10 items: {sorted(contents)[:10]}")
+                        # Check for numeric directories
+                        numeric_dirs = [c for c in contents if osp.isdir(osp.join(expanded_path, c)) and c.isdigit()]
+                        print(f"    - Numeric directories: {len(numeric_dirs)}")
+                        if numeric_dirs:
+                            print(f"    - Examples: {sorted(numeric_dirs)[:5]}")
+                            # Check first numeric dir
+                            first_numeric = osp.join(expanded_path, sorted(numeric_dirs)[0])
+                            first_contents = os.listdir(first_numeric)
+                            print(f"    - Contents of {sorted(numeric_dirs)[0]}: {first_contents}")
                     except Exception as e:
-                        print(f"     Could not list directory: {e}")
+                        print(f"    - Could not list directory: {e}")
 
         total_length += length
 
-    print(f"Found {len(tar_file_list)} tar files, {len(extracted_dirs)} extracted directories")
+    print(f"\n" + "="*60)
+    print(f"SUMMARY:")
+    print(f"  Tar files found: {len(tar_file_list)}")
+    print(f"  Extracted directories found: {len(extracted_dirs)}")
+    print(f"  Total expected length: {total_length}")
+    print(f"="*60)
 
     # Build dataset based on what we found
     if tar_file_list and not extracted_dirs:
         # Use tar files
+        print(f"\n[INFO] Using {len(tar_file_list)} tar files")
+        print(f"[INFO] Tar files: {tar_file_list}")
         dataset = (
             wds.WebDataset(tar_file_list, repeat=True, handler=warn_and_continue)
             .shuffle(40000)
@@ -318,13 +372,18 @@ def build_dataset(config):
         )
     elif extracted_dirs and not tar_file_list:
         # Use extracted directories (combine multiple if needed)
+        print(f"\n[INFO] Using {len(extracted_dirs)} extracted directories")
+        print(f"[INFO] Extracted dirs: {extracted_dirs}")
         if len(extracted_dirs) == 1:
             dataset = ExtractedWebDataset(extracted_dirs[0], img_transform, text_transform)
         else:
             # Combine multiple extracted directories
             combined_dir = extracted_dirs[0]
+            print(f"[WARNING] Multiple extracted directories found, using only: {combined_dir}")
             dataset = ExtractedWebDataset(combined_dir, img_transform, text_transform)
     else:
+        print(f"\n[ERROR] No tar files or extracted directories found!")
+        print(f"[ERROR] tar_files={len(tar_file_list)}, extracted_dirs={len(extracted_dirs)}")
         raise ValueError(f"No tar files or extracted directories found. tar_files={len(tar_file_list)}, extracted_dirs={len(extracted_dirs)}")
 
     # Add length if dataset supports it
