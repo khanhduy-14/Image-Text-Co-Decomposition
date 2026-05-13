@@ -145,6 +145,51 @@ def warn_and_continue(exn):
     return True
 
 
+def is_flat_webdataset(path):
+    """Check if path is a flat webdataset directory with paired image-text files
+
+    Structure: path/00000/000000000.jpg, path/00000/000000000.txt, etc.
+    """
+    print(f"    [is_flat_webdataset] Checking: {path}")
+
+    if not osp.isdir(path):
+        print(f"    [is_flat_webdataset] Not a directory, skipping")
+        return False
+
+    # Check for numbered subdirectories (00000, 00001, etc.)
+    all_items = os.listdir(path)
+    subdirs = [d for d in all_items
+               if osp.isdir(osp.join(path, d)) and d.isdigit()]
+
+    print(f"    [is_flat_webdataset] Total items: {len(all_items)}")
+    print(f"    [is_flat_webdataset] Numeric subdirs found: {len(subdirs)}")
+
+    if not subdirs:
+        print(f"    [is_flat_webdataset] No numeric subdirectories found")
+        return False
+
+    # Check if first subdir has MULTIPLE paired image and text files
+    first_dir = osp.join(path, subdirs[0])
+    files = os.listdir(first_dir)
+
+    # Count image files
+    image_files = [f for f in files if f.endswith(('.jpg', '.png', '.jpeg'))]
+    # Count text files
+    text_files = [f for f in files if f.endswith(('.txt', '.text'))]
+
+    print(f"    [is_flat_webdataset] First subdir ({subdirs[0]}): {len(files)} total files")
+    print(f"    [is_flat_webdataset] Image files: {len(image_files)}, Text files: {len(text_files)}")
+
+    # For flat structure: we should have multiple image AND text files
+    # (as opposed to extracted structure which might have just one of each)
+    has_multiple_images = len(image_files) > 1
+    has_multiple_texts = len(text_files) > 1
+
+    result = has_multiple_images and has_multiple_texts
+    print(f"    [is_flat_webdataset] Result: {result}")
+    return result
+
+
 def is_extracted_webdataset(path):
     """Check if path is an extracted webdataset directory"""
     print(f"    [is_extracted_webdataset] Checking: {path}")
@@ -178,6 +223,107 @@ def is_extracted_webdataset(path):
     result = has_image and has_text
     print(f"    [is_extracted_webdataset] Result: {result}")
     return result
+
+
+class FlatWebDataset(torch.utils.data.IterableDataset):
+    """Dataset for flat webdataset directories with paired image-text files
+
+    Structure: path/00000/000000000.jpg, path/00000/000000000.txt, etc.
+    Files are grouped by base name (without extension).
+    """
+
+    def __init__(self, dir_path, img_transform, text_transform):
+        self.dir_path = dir_path
+        self.img_transform = img_transform
+        self.text_transform = text_transform
+
+        # Collect all sample directories
+        self.subdirs = sorted([
+            d for d in os.listdir(dir_path)
+            if osp.isdir(osp.join(dir_path, d)) and d.isdigit()
+        ])
+
+        # Build list of all samples (path, image_file, text_file)
+        self.samples = []
+        for subdir in self.subdirs:
+            subdir_path = osp.join(dir_path, subdir)
+            self.samples.extend(self._get_paired_samples(subdir_path))
+
+        self._length = len(self.samples)
+
+    def _get_paired_samples(self, dir_path):
+        """Find all paired image-text files in a directory.
+
+        Returns list of tuples: (image_path, text_path)
+        """
+        files = os.listdir(dir_path)
+
+        # Group files by base name (without extension)
+        base_names = {}
+        for f in files:
+            # Split by last dot to separate extension
+            if '.' in f:
+                base = f.rsplit('.', 1)[0]
+                ext = f.rsplit('.', 1)[1].lower()
+            else:
+                continue
+
+            if base not in base_names:
+                base_names[base] = {}
+            base_names[base][ext] = f
+
+        # Find pairs
+        paired_samples = []
+        for base, extensions in base_names.items():
+            # Find image file
+            image_file = None
+            for img_ext in ['jpg', 'jpeg', 'png']:
+                if img_ext in extensions:
+                    image_file = extensions[img_ext]
+                    break
+
+            # Find text file
+            text_file = None
+            for txt_ext in ['txt', 'text']:
+                if txt_ext in extensions:
+                    text_file = extensions[txt_ext]
+                    break
+
+            # Add if both found
+            if image_file and text_file:
+                img_path = osp.join(dir_path, image_file)
+                txt_path = osp.join(dir_path, text_file)
+                paired_samples.append((img_path, txt_path))
+
+        return paired_samples
+
+    def __len__(self):
+        return self._length
+
+    def __iter__(self):
+        while True:
+            for img_path, txt_path in self.samples:
+                try:
+                    # Load image
+                    image = Image.open(img_path).convert('RGB')
+
+                    # Load text
+                    with open(txt_path, 'r', encoding='utf-8') as f:
+                        caption = f.read().strip()
+
+                    # Apply transforms
+                    image = self.img_transform(image)
+                    nouns, caption, pseudo_text_mask = self.text_transform(caption)
+
+                    yield {
+                        'image': image,
+                        'text': (nouns, caption, pseudo_text_mask)
+                    }
+
+                except (NounNotEnoughError, Exception) as e:
+                    if not isinstance(e, NounNotEnoughError):
+                        warnings.warn(repr(e))
+                    continue
 
 
 class ExtractedWebDataset(torch.utils.data.IterableDataset):
@@ -305,9 +451,17 @@ def build_dataset(config):
             print(f"  Is file: {osp.isfile(expanded_path)}")
             print(f"  Is dir: {osp.isdir(expanded_path)}")
 
-            # Check if it's an extracted webdataset directory
-            if is_extracted_webdataset(expanded_path):
-                extracted_dirs.append(expanded_path)
+            # Check if it's a flat webdataset directory first (more specific)
+            if is_flat_webdataset(expanded_path):
+                extracted_dirs.append((expanded_path, 'flat'))
+                print(f"  ✓ Found flat webdataset: {expanded_path}")
+                # Count subdirectories
+                subdirs = [d for d in os.listdir(expanded_path) if osp.isdir(osp.join(expanded_path, d)) and d.isdigit()]
+                print(f"    - Subdirectories: {len(subdirs)}")
+                print(f"    - Examples: {sorted(subdirs)[:5]}")
+            # Then check if it's an extracted webdataset directory
+            elif is_extracted_webdataset(expanded_path):
+                extracted_dirs.append((expanded_path, 'extracted'))
                 print(f"  ✓ Found extracted webdataset: {expanded_path}")
                 # Count subdirectories
                 subdirs = [d for d in os.listdir(expanded_path) if osp.isdir(osp.join(expanded_path, d)) and d.isdigit()]
@@ -375,12 +529,19 @@ def build_dataset(config):
         print(f"\n[INFO] Using {len(extracted_dirs)} extracted directories")
         print(f"[INFO] Extracted dirs: {extracted_dirs}")
         if len(extracted_dirs) == 1:
-            dataset = ExtractedWebDataset(extracted_dirs[0], img_transform, text_transform)
+            dir_path, dir_type = extracted_dirs[0]
+            if dir_type == 'flat':
+                dataset = FlatWebDataset(dir_path, img_transform, text_transform)
+            else:
+                dataset = ExtractedWebDataset(dir_path, img_transform, text_transform)
         else:
             # Combine multiple extracted directories
-            combined_dir = extracted_dirs[0]
-            print(f"[WARNING] Multiple extracted directories found, using only: {combined_dir}")
-            dataset = ExtractedWebDataset(combined_dir, img_transform, text_transform)
+            dir_path, dir_type = extracted_dirs[0]
+            print(f"[WARNING] Multiple extracted directories found, using only: {dir_path}")
+            if dir_type == 'flat':
+                dataset = FlatWebDataset(dir_path, img_transform, text_transform)
+            else:
+                dataset = ExtractedWebDataset(dir_path, img_transform, text_transform)
     else:
         print(f"\n[ERROR] No tar files or extracted directories found!")
         print(f"[ERROR] tar_files={len(tar_file_list)}, extracted_dirs={len(extracted_dirs)}")
