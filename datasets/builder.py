@@ -1,10 +1,10 @@
-# ------------------------------------------------------------------------------
+# ------- -------
 # CoDe
 # Copyright (C) 2024 by Ji-Jia Wu. All Rights Reserved.
-# ------------------------------------------------------------------------------
+# -------
 # Modified from TCL (https://github.com/kakaobrain/tcl)
 # Copyright (c) 2023 Kakao Brain. All Rights Reserved.
-# ------------------------------------------------------------------------------
+# -------
 import os
 import os.path as osp
 import random
@@ -14,7 +14,7 @@ import glob
 
 import numpy as np
 import torch.distributed as dist
-import webdataset as wds
+from torch.utils.data import DataLoader
 from braceexpand import braceexpand
 from timm.data import create_transform
 from torchvision import transforms as T
@@ -29,6 +29,11 @@ from PIL import Image
 import torch
 from sclip.simple_tokenizer import SimpleTokenizer as _Tokenizer
 from sclip import tokenize
+
+try:
+    import webdataset as wds
+except ImportError:
+    wds = None
 
 
 def collate(data):
@@ -102,54 +107,42 @@ class TextPreprocess:
         return selected_nouns, caption, pseudo_text_mask.long()
 
 
-class BatchableIterableDataset(torch.utils.data.IterableDataset):
-    """Wrapper for IterableDataset that provides a .batched() method for compatibility with WebLoader.
-
-    This allows any IterableDataset to work with webdataset.WebLoader by providing the .batched() method
-    that creates batches using a collate function.
-    """
-
-    def __init__(self, dataset):
-        self.dataset = dataset
-
-    def __len__(self):
-        if hasattr(self.dataset, '__len__'):
-            return len(self.dataset)
-        return 0
-
-    def __iter__(self):
-        return iter(self.dataset)
-
-    def batched(self, batch_size, collate_fn=None, partial=False):
-        """Batch the dataset using the provided collate function.
-
-        Args:
-            batch_size: Number of samples per batch
-            collate_fn: Function to collate samples into batches
-            partial: If True, yield incomplete final batches. If False, drop them.
-
-        Yields:
-            Batches of data
-        """
-        batch = []
-        for sample in iter(self.dataset):
-            batch.append(sample)
-            if len(batch) == batch_size:
-                yield collate_fn(batch) if collate_fn else batch
-                batch = []
-
-        # Handle remaining samples
-        if batch:
-            if partial or len(batch) == batch_size:
-                yield collate_fn(batch) if collate_fn else batch
-
-
 def worker_init_fn(worker_id, num_workers, rank, seed):
     # The seed of each worker equals to
     # num_worker * rank + worker_id + user_seed
     worker_seed = num_workers * rank + worker_id + seed
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+
+
+class RepeatingDataLoader:
+    """Wrapper that repeats a DataLoader and cycles through epochs.
+
+    Yields batches from the underlying DataLoader repeatedly until
+    the total number of batches yielded reaches nbatches.
+
+    Args:
+        data_loader: PyTorch DataLoader instance
+        nbatches: Total number of batches to yield before stopping
+    """
+
+    def __init__(self, data_loader, nbatches):
+        self.data_loader = data_loader
+        self.nbatches = nbatches
+
+    def __iter__(self):
+        """Yield batches, repeating epochs until nbatches limit is reached."""
+        batch_count = 0
+        while batch_count < self.nbatches:
+            for batch in self.data_loader:
+                if batch_count >= self.nbatches:
+                    break
+                yield batch
+                batch_count += 1
+
+    def __len__(self):
+        """Return the total number of batches."""
+        return self.nbatches
 
 
 def build_loader(config):
@@ -159,21 +152,37 @@ def build_loader(config):
     init_fn = partial(
         worker_init_fn, num_workers=config.num_workers, rank=dist.get_rank(), seed=config.seed
     )
-    data_loader_train = wds.WebLoader(
-        dataset_train.batched(config.batch_size, collate, partial=False),
-        batch_size=None,
+
+    # Check if this is an IterableDataset to force num_workers=0
+    is_iterable_dataset = isinstance(dataset_train, torch.utils.data.IterableDataset)
+    num_workers = 0 if is_iterable_dataset else config.num_workers
+
+    us.dprint(f"Dataset type: {type(dataset_train).__name__}, is_iterable: {is_iterable_dataset}, num_workers: {num_workers}")
+
+    data_loader_train = DataLoader(
+        dataset_train,
+        batch_size=config.batch_size,
         shuffle=False,
-        num_workers=config.num_workers,
+        num_workers=num_workers,
         pin_memory=config.pin_memory,
-        persistent_workers=config.num_workers > 0,
-        worker_init_fn=init_fn,
+        persistent_workers=(num_workers > 0),
+        worker_init_fn=init_fn if num_workers > 0 else None,
+        collate_fn=collate,
     )
 
-    train_len = len(dataset_train)
-    train_nbatches = max(
-        1, train_len // (config.batch_size * dist.get_world_size()))
-    data_loader_train = data_loader_train.with_epoch(
-        train_nbatches).with_length(train_nbatches)
+    # Get number of batches for training loop
+    if hasattr(dataset_train, '__len__'):
+        try:
+            train_len = len(dataset_train)
+            train_nbatches = max(1, train_len // (config.batch_size * dist.get_world_size()))
+        except (TypeError, RuntimeError) as e:
+            us.dprint(f"Warning: Could not get dataset length: {e}")
+            train_nbatches = 10000
+    else:
+        train_nbatches = 10000
+
+    us.dprint(f"Train batches: {train_nbatches}")
+    data_loader_train = RepeatingDataLoader(data_loader_train, train_nbatches)
 
     return dataset_train, data_loader_train
 
@@ -524,7 +533,7 @@ def build_dataset(config):
             # Check if it's a flat webdataset directory first (more specific)
             if is_flat_webdataset(expanded_path):
                 extracted_dirs.append((expanded_path, 'flat'))
-                print(f"  ✓ Found flat webdataset: {expanded_path}")
+                print(f"  FOUND flat webdataset: {expanded_path}")
                 # Count subdirectories
                 subdirs = [d for d in os.listdir(expanded_path) if osp.isdir(osp.join(expanded_path, d)) and d.isdigit()]
                 print(f"    - Subdirectories: {len(subdirs)}")
@@ -532,7 +541,7 @@ def build_dataset(config):
             # Then check if it's an extracted webdataset directory
             elif is_extracted_webdataset(expanded_path):
                 extracted_dirs.append((expanded_path, 'extracted'))
-                print(f"  ✓ Found extracted webdataset: {expanded_path}")
+                print(f"  FOUND extracted webdataset: {expanded_path}")
                 # Count subdirectories
                 subdirs = [d for d in os.listdir(expanded_path) if osp.isdir(osp.join(expanded_path, d)) and d.isdigit()]
                 print(f"    - Subdirectories: {len(subdirs)}")
@@ -540,13 +549,13 @@ def build_dataset(config):
             # Check if it's a tar file
             elif expanded_path.endswith('.tar') and osp.isfile(expanded_path):
                 tar_file_list.append(expanded_path)
-                print(f"  ✓ Found tar file")
+                print(f"  FOUND tar file")
             # Check for tar files in directory
             elif osp.isdir(expanded_path):
                 found_tars = glob.glob(osp.join(expanded_path, '*.tar'))
                 if found_tars:
                     tar_file_list.extend(found_tars)
-                    print(f"  ✓ Found {len(found_tars)} tar files in {expanded_path}")
+                    print(f"  FOUND {len(found_tars)} tar files in {expanded_path}")
                 else:
                     print(f"  ! Is directory but no tar files found")
                     # Debug: list contents
@@ -580,6 +589,8 @@ def build_dataset(config):
         # Use tar files
         print(f"\n[INFO] Using {len(tar_file_list)} tar files")
         print(f"[INFO] Tar files: {tar_file_list}")
+        if wds is None:
+            raise RuntimeError("webdataset is required to use tar files but is not installed")
         dataset = (
             wds.WebDataset(tar_file_list, repeat=True, handler=warn_and_continue)
             .shuffle(40000)
@@ -631,10 +642,6 @@ def build_dataset(config):
     # Add length if dataset supports it
     if hasattr(dataset, 'with_length'):
         dataset = dataset.with_length(total_length)
-
-    # Wrap IterableDataset types with BatchableIterableDataset for WebLoader compatibility
-    if isinstance(dataset, (FlatWebDataset, ExtractedWebDataset)):
-        dataset = BatchableIterableDataset(dataset)
 
     return dataset
 
