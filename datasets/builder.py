@@ -102,6 +102,48 @@ class TextPreprocess:
         return selected_nouns, caption, pseudo_text_mask.long()
 
 
+class BatchableIterableDataset(torch.utils.data.IterableDataset):
+    """Wrapper for IterableDataset that provides a .batched() method for compatibility with WebLoader.
+
+    This allows any IterableDataset to work with webdataset.WebLoader by providing the .batched() method
+    that creates batches using a collate function.
+    """
+
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __len__(self):
+        if hasattr(self.dataset, '__len__'):
+            return len(self.dataset)
+        return 0
+
+    def __iter__(self):
+        return iter(self.dataset)
+
+    def batched(self, batch_size, collate_fn=None, partial=False):
+        """Batch the dataset using the provided collate function.
+
+        Args:
+            batch_size: Number of samples per batch
+            collate_fn: Function to collate samples into batches
+            partial: If True, yield incomplete final batches. If False, drop them.
+
+        Yields:
+            Batches of data
+        """
+        batch = []
+        for sample in iter(self.dataset):
+            batch.append(sample)
+            if len(batch) == batch_size:
+                yield collate_fn(batch) if collate_fn else batch
+                batch = []
+
+        # Handle remaining samples
+        if batch:
+            if partial or len(batch) == batch_size:
+                yield collate_fn(batch) if collate_fn else batch
+
+
 def worker_init_fn(worker_id, num_workers, rank, seed):
     # The seed of each worker equals to
     # num_worker * rank + worker_id + user_seed
@@ -564,12 +606,23 @@ def build_dataset(config):
                 dataset = ExtractedWebDataset(dir_path, img_transform, text_transform)
         else:
             # Combine multiple extracted directories
-            dir_path, dir_type = extracted_dirs[0]
-            print(f"[WARNING] Multiple extracted directories found, using only: {dir_path}")
-            if dir_type == 'flat':
-                dataset = FlatWebDataset(dir_path, img_transform, text_transform)
+            all_flat = all(d_type == 'flat' for _, d_type in extracted_dirs)
+            if all_flat:
+                dir_paths = [d_path for d_path, _ in extracted_dirs]
+                parent_dir = osp.dirname(dir_paths[0])
+                if all(osp.dirname(dp) == parent_dir for dp in dir_paths):
+                    print(f"[INFO] Multiple flat directories detected, using parent: {parent_dir}")
+                    dataset = FlatWebDataset(parent_dir, img_transform, text_transform)
+                else:
+                    print(f"[WARNING] Multiple flat dirs found, using only: {dir_paths[0]}")
+                    dataset = FlatWebDataset(dir_paths[0], img_transform, text_transform)
             else:
-                dataset = ExtractedWebDataset(dir_path, img_transform, text_transform)
+                dir_path, dir_type = extracted_dirs[0]
+                print(f"[WARNING] Mixed types found, using only: {dir_path}")
+                if dir_type == 'flat':
+                    dataset = FlatWebDataset(dir_path, img_transform, text_transform)
+                else:
+                    dataset = ExtractedWebDataset(dir_path, img_transform, text_transform)
     else:
         print(f"\n[ERROR] No tar files or extracted directories found!")
         print(f"[ERROR] tar_files={len(tar_file_list)}, extracted_dirs={len(extracted_dirs)}")
@@ -578,6 +631,10 @@ def build_dataset(config):
     # Add length if dataset supports it
     if hasattr(dataset, 'with_length'):
         dataset = dataset.with_length(total_length)
+
+    # Wrap IterableDataset types with BatchableIterableDataset for WebLoader compatibility
+    if isinstance(dataset, (FlatWebDataset, ExtractedWebDataset)):
+        dataset = BatchableIterableDataset(dataset)
 
     return dataset
 
