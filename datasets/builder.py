@@ -146,9 +146,13 @@ def warn_and_continue(exn):
 
 
 def is_flat_webdataset(path):
-    """Check if path is a flat webdataset directory with paired image-text files
+    """Check if path is a flat webdataset numbered subdirectory with paired image-text files
 
-    Structure: path/00000/000000000.jpg, path/00000/000000000.txt, etc.
+    This function checks if the given path IS a numbered directory (like 00000) containing
+    image and text files DIRECTLY (not in nested subdirectories).
+
+    Structure: /base/00000/000000000.jpg, /base/00000/000000000.txt, etc.
+    When called with path=/base/00000, this should detect the flat structure.
     """
     print(f"    [is_flat_webdataset] Checking: {path}")
 
@@ -156,28 +160,36 @@ def is_flat_webdataset(path):
         print(f"    [is_flat_webdataset] Not a directory, skipping")
         return False
 
-    # Check for numbered subdirectories (00000, 00001, etc.)
-    all_items = os.listdir(path)
-    subdirs = [d for d in all_items
-               if osp.isdir(osp.join(path, d)) and d.isdigit()]
+    # Get the directory name to check if it's a numbered directory (like 00000, 00001, etc.)
+    dir_name = osp.basename(path.rstrip('/'))
+    is_numbered_dir = dir_name.isdigit() and len(dir_name) == 5  # e.g., 00000, 00001
 
-    print(f"    [is_flat_webdataset] Total items: {len(all_items)}")
-    print(f"    [is_flat_webdataset] Numeric subdirs found: {len(subdirs)}")
+    print(f"    [is_flat_webdataset] Directory name: '{dir_name}'")
+    print(f"    [is_flat_webdataset] Is numbered directory: {is_numbered_dir}")
 
-    if not subdirs:
-        print(f"    [is_flat_webdataset] No numeric subdirectories found")
+    if not is_numbered_dir:
+        print(f"    [is_flat_webdataset] Not a numbered directory")
         return False
 
-    # Check if first subdir has MULTIPLE paired image and text files
-    first_dir = osp.join(path, subdirs[0])
-    files = os.listdir(first_dir)
+    # Get all files in this directory
+    all_items = os.listdir(path)
 
-    # Count image files
+    # Check if there are any subdirectories (nested structure)
+    has_subdirs = any(osp.isdir(osp.join(path, item)) for item in all_items)
+
+    print(f"    [is_flat_webdataset] Total items: {len(all_items)}")
+    print(f"    [is_flat_webdataset] Has subdirectories: {has_subdirs}")
+
+    if has_subdirs:
+        print(f"    [is_flat_webdataset] Found subdirectories - not a flat structure")
+        return False
+
+    # Count image and text files directly in this directory
+    files = [f for f in all_items if osp.isfile(osp.join(path, f))]
     image_files = [f for f in files if f.endswith(('.jpg', '.png', '.jpeg'))]
-    # Count text files
     text_files = [f for f in files if f.endswith(('.txt', '.text'))]
 
-    print(f"    [is_flat_webdataset] First subdir ({subdirs[0]}): {len(files)} total files")
+    print(f"    [is_flat_webdataset] Total files: {len(files)}")
     print(f"    [is_flat_webdataset] Image files: {len(image_files)}, Text files: {len(text_files)}")
 
     # For flat structure: we should have multiple image AND text files
@@ -228,8 +240,11 @@ def is_extracted_webdataset(path):
 class FlatWebDataset(torch.utils.data.IterableDataset):
     """Dataset for flat webdataset directories with paired image-text files
 
-    Structure: path/00000/000000000.jpg, path/00000/000000000.txt, etc.
-    Files are grouped by base name (without extension).
+    Can handle two scenarios:
+    1. dir_path is a numbered subdirectory like /base/00000 (direct flat structure)
+    2. dir_path is a base directory containing numbered subdirectories (legacy)
+
+    In either case, files are grouped by base name (without extension).
     """
 
     def __init__(self, dir_path, img_transform, text_transform):
@@ -237,19 +252,32 @@ class FlatWebDataset(torch.utils.data.IterableDataset):
         self.img_transform = img_transform
         self.text_transform = text_transform
 
-        # Collect all sample directories
-        self.subdirs = sorted([
-            d for d in os.listdir(dir_path)
-            if osp.isdir(osp.join(dir_path, d)) and d.isdigit()
-        ])
+        # Check if dir_path itself is a numbered directory (flat structure)
+        dir_name = osp.basename(dir_path.rstrip('/'))
+        is_numbered_dir = dir_name.isdigit() and len(dir_name) >= 5
+
+        if is_numbered_dir:
+            # Path itself is a numbered directory - use it directly
+            print(f"[FlatWebDataset] Detected numbered directory: {dir_path}")
+            self.subdirs = [dir_path]
+        else:
+            # Path is a base directory - collect numbered subdirectories
+            print(f"[FlatWebDataset] Detecting numbered subdirectories in: {dir_path}")
+            self.subdirs = [
+                osp.join(dir_path, d)
+                for d in sorted(os.listdir(dir_path))
+                if osp.isdir(osp.join(dir_path, d)) and d.isdigit()
+            ]
+
+        print(f"[FlatWebDataset] Processing {len(self.subdirs)} directories")
 
         # Build list of all samples (path, image_file, text_file)
         self.samples = []
         for subdir in self.subdirs:
-            subdir_path = osp.join(dir_path, subdir)
-            self.samples.extend(self._get_paired_samples(subdir_path))
+            self.samples.extend(self._get_paired_samples(subdir))
 
         self._length = len(self.samples)
+        print(f"[FlatWebDataset] Total samples: {self._length}")
 
     def _get_paired_samples(self, dir_path):
         """Find all paired image-text files in a directory.
