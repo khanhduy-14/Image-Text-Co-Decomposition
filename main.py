@@ -70,6 +70,7 @@ def get_argparser():
     parser.add_argument("--eval", action="store_true", help="Perform evaluation only")
     parser.add_argument("--wandb", action="store_true", help="Use W&B to log experiments")
     parser.add_argument("--method-name", required=True, help="experiment method name")
+    parser.add_argument("--max_datasets_to_check", type=int, default=None, help="Max number of datasets to check for debugging")
 
     return parser
 
@@ -95,7 +96,8 @@ def train(cfg):
 
     # build datasets
     if not cfg.evaluate.eval_only:
-        dataset_train, data_loader_train = build_loader(cfg.data)
+        print(f"Attempting to load dataset from: {cfg.data.dataset.meta.sub_captions.path}")
+        dataset_train, data_loader_train = build_loader(cfg.data, max_datasets_to_check=cfg.max_datasets_to_check)
     else:
         dataset_train, data_loader_train = None, None
 

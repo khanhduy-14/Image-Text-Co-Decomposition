@@ -30,6 +30,8 @@ def get_config(args):
 
     if args.opts is not None:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.opts))
+    if args.max_datasets_to_check is not None:
+        cfg.max_datasets_to_check = args.max_datasets_to_check
     if hasattr(args, "batch_size") and args.batch_size:
         cfg.data.batch_size = args.batch_size
 
@@ -54,6 +56,11 @@ def get_config(args):
 
     if hasattr(args, "wandb") and args.wandb:
         cfg.wandb = args.wandb
+
+    if hasattr(args, "max_datasets_to_check") and args.max_datasets_to_check is not None:
+        cfg.max_datasets_to_check = args.max_datasets_to_check
+    else:
+        cfg.max_datasets_to_check = None
 
     OmegaConf.set_readonly(cfg, True)
 

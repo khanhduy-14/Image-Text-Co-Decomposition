@@ -97,6 +97,13 @@ train:
 evaluate:
   eval_only: false
   eval_freq: 5000
+  task:
+      - voc
+      - context
+      - coco_stuff
+      - coco_object
+      - cityscapes
+      - ade20k
 
 checkpoint:
   resume: ''
@@ -109,3 +116,5 @@ print_freq: 20
 seed: 0
 method_name: ???
 wandb: false
+
+max_datasets_to_check: null

@@ -110,30 +110,26 @@ def worker_init_fn(worker_id, num_workers, rank, seed):
     random.seed(worker_seed)
 
 
-def build_loader(config):
-    dataset_train = build_dataset(config=config)
+def build_loader(config, max_datasets_to_check=None):
+    dataset_train = build_dataset(config=config, max_datasets_to_check=max_datasets_to_check)
     us.dprint("successfully build train dataset")
 
     init_fn = partial(
         worker_init_fn, num_workers=config.num_workers, rank=dist.get_rank(), seed=config.seed
     )
-    data_loader_train = wds.WebLoader(
-        dataset_train.batched(config.batch_size, collate, partial=False),
-        batch_size=None,
-        shuffle=False,
+    loader = wds.WebLoader(
+        dataset_train,
+        batch_size=config.batch_size,
         num_workers=config.num_workers,
         pin_memory=config.pin_memory,
-        persistent_workers=config.num_workers > 0,
-        worker_init_fn=init_fn,
     )
 
     train_len = len(dataset_train)
     train_nbatches = max(
         1, train_len // (config.batch_size * dist.get_world_size()))
-    data_loader_train = data_loader_train.with_epoch(
-        train_nbatches).with_length(train_nbatches)
+    loader = loader.with_epoch(train_nbatches).with_length(train_nbatches)
 
-    return dataset_train, data_loader_train
+    return dataset_train, loader
 
 
 def warn_and_continue(exn):
@@ -417,10 +413,11 @@ class ExtractedWebDataset(torch.utils.data.IterableDataset):
                     continue
 
 
-def build_dataset(config):
+def build_dataset(config, max_datasets_to_check=None):
     """
     Args:
         config: CONFIG.data (CONFIG = global config)
+        max_datasets_to_check (int, optional): Max number of datasets to check. Defaults to None.
     """
     img_transform = build_img_transform(config.img_aug)
     text_transform = TextPreprocess(
@@ -431,7 +428,12 @@ def build_dataset(config):
     extracted_dirs = []
     total_length = 0
 
-    for ds in config.dataset[split]:
+    datasets_to_process = config.dataset[split]
+    if max_datasets_to_check is not None:
+        print(f"[INFO] Checking only the first {max_datasets_to_check} dataset(s).")
+        datasets_to_process = datasets_to_process[:max_datasets_to_check]
+
+    for ds in datasets_to_process:
         ds_meta = config.dataset.meta[ds]
         if dataset_type is None:
             dataset_type = ds_meta.type
@@ -466,6 +468,8 @@ def build_dataset(config):
                 print(f"[DEBUG] Error listing path: {e}")
 
         expanded_paths = list(braceexpand(osp.join(path, prefix)))
+        if max_datasets_to_check is not None:
+            expanded_paths = expanded_paths[:max_datasets_to_check]
         print(f"\nExpanded paths ({len(expanded_paths)} total): {expanded_paths}")
 
         for i, expanded_path in enumerate(expanded_paths):
